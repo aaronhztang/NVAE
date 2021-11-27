@@ -48,7 +48,7 @@ def main(args):
     model = model.cuda()
 
     # classifier = MLP([102400, 6400, 400, 10])
-    classifier = MLP([102400, 1024, 10])
+    classifier = MLP([102400, 10])
     classifier = classifier.cuda()
 
     logging.info('args = %s', args)
