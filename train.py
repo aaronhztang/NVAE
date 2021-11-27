@@ -23,6 +23,8 @@ import datasets
 from fid.fid_score import compute_statistics_of_generator, load_statistics, calculate_frechet_distance
 from fid.inception import InceptionV3
 
+from tqdm.notebook import tqdm, tqdm_notebook
+from classifier import MLP
 
 def main(args):
     # ensures that weight initializations are all the same
@@ -45,6 +47,10 @@ def main(args):
     model = AutoEncoder(args, writer, arch_instance)
     model = model.cuda()
 
+    # classifier = MLP([102400, 6400, 400, 10])
+    classifier = MLP([102400, 1024, 10])
+    classifier = classifier.cuda()
+
     logging.info('args = %s', args)
     logging.info('param size = %fM ', utils.count_parameters_in_M(model))
     logging.info('groups per scale: %s, total_groups: %d', model.groups_per_scale, sum(model.groups_per_scale))
@@ -59,47 +65,93 @@ def main(args):
 
     cnn_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         cnn_optimizer, float(args.epochs - args.warmup_epochs - 1), eta_min=args.learning_rate_min)
+
+    # Define Criterion/ Loss function
+    classifier_criterion = nn.CrossEntropyLoss()
+
+    # Define Adam Optimizer
+    classifier_optimizer = torch.optim.Adam(classifier.parameters(), lr = 0.001)
+
+    classifier_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(classifier_optimizer, 'min', factor=0.5, patience=5, verbose=True)
+
     grad_scalar = GradScaler(2**10)
 
     num_output = utils.num_output(args.dataset)
     bpd_coeff = 1. / np.log(2.) / num_output
 
+    temp_args = args
+
     # if load
     checkpoint_file = os.path.join(args.save, 'checkpoint.pt')
+    print(checkpoint_file)
     if args.cont_training:
         logging.info('loading the model.')
         checkpoint = torch.load(checkpoint_file, map_location='cpu')
+        temp_args = checkpoint['args']
+        if not hasattr(temp_args, 'ada_groups'):
+            logging.info('old model, no ada groups was found.')
+            temp_args.ada_groups = False
+        if not hasattr(temp_args, 'min_groups_per_scale'):
+            logging.info('old model, no min_groups_per_scale was found.')
+            temp_args.min_groups_per_scale = 1
+        if not hasattr(temp_args, 'num_mixture_dec'):
+            logging.info('old model, no num_mixture_dec was found.')
+            temp_args.num_mixture_dec = 10
+        if args.batch_size > 0:
+            temp_args.batch_size = args.batch_size
+        logging.info('loaded the model at epoch %d', checkpoint['epoch'])
+        arch_instance = utils.get_arch_cells(temp_args.arch_instance)
+        model = AutoEncoder(temp_args, writer, arch_instance)
         init_epoch = checkpoint['epoch']
-        model.load_state_dict(checkpoint['state_dict'])
+        model.load_state_dict(checkpoint['state_dict'], strict=False)
         model = model.cuda()
+        logging.info('temp_args = %s', temp_args)
+        logging.info('param size = %fM ', utils.count_parameters_in_M(model))
+        logging.info('groups per scale: %s, total_groups: %d', model.groups_per_scale, sum(model.groups_per_scale))
+        if temp_args.fast_adamax:
+            # Fast adamax has the same functionality as torch.optim.Adamax, except it is faster.
+            cnn_optimizer = Adamax(model.parameters(), temp_args.learning_rate,
+                                weight_decay=temp_args.weight_decay, eps=1e-3)
+        else:
+            cnn_optimizer = torch.optim.Adamax(model.parameters(), temp_args.learning_rate,
+                                            weight_decay=temp_args.weight_decay, eps=1e-3)
+        cnn_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            cnn_optimizer, float(args.epochs - temp_args.warmup_epochs - 1), eta_min=temp_args.learning_rate_min)
         cnn_optimizer.load_state_dict(checkpoint['optimizer'])
         grad_scalar.load_state_dict(checkpoint['grad_scalar'])
         cnn_scheduler.load_state_dict(checkpoint['scheduler'])
         global_step = checkpoint['global_step']
+        # classifier.load_state_dict(checkpoint['classifier'])
+        # classifier = classifier.cuda()
+        # classifier_optimizer.load_state_dict(['classifier_optimizer'])
+        # classifier_scheduler.load_state_dict(['classifier_scheduler'])
     else:
         global_step, init_epoch = 0, 0
 
     for epoch in range(init_epoch, args.epochs):
         # update lrs.
-        if args.distributed:
+        if temp_args.distributed:
             train_queue.sampler.set_epoch(global_step + args.seed)
             valid_queue.sampler.set_epoch(0)
 
-        if epoch > args.warmup_epochs:
+        if epoch > temp_args.warmup_epochs:
             cnn_scheduler.step()
 
         # Logging.
         logging.info('epoch %d', epoch)
 
         # Training.
-        train_nelbo, global_step = train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_iters, writer, logging)
+        train_nelbo, global_step = train(train_queue, model, cnn_optimizer,
+         grad_scalar, global_step, warmup_iters, writer, logging, 
+         classifier, classifier_criterion, classifier_optimizer, temp_args)
         logging.info('train_nelbo %f', train_nelbo)
         writer.add_scalar('train/nelbo', train_nelbo, global_step)
 
         model.eval()
         # generate samples less frequently
         eval_freq = 1 if args.epochs <= 50 else 20
-        if epoch % eval_freq == 0 or epoch == (args.epochs - 1):
+        # if epoch % eval_freq == 0 or epoch == (args.epochs - 1):
+        if True:
             with torch.no_grad():
                 num_samples = 16
                 n = int(np.floor(np.sqrt(num_samples)))
@@ -110,7 +162,7 @@ def main(args):
                     output_tiled = utils.tile_image(output_img, n)
                     writer.add_image('generated_%0.1f' % t, output_tiled, global_step)
 
-            valid_neg_log_p, valid_nelbo = test(valid_queue, model, num_samples=10, args=args, logging=logging)
+            valid_neg_log_p, valid_nelbo = test(valid_queue, model, num_samples=10, args=temp_args, logging=logging)
             logging.info('valid_nelbo %f', valid_nelbo)
             logging.info('valid neg log p %f', valid_neg_log_p)
             logging.info('valid bpd elbo %f', valid_nelbo * bpd_coeff)
@@ -121,16 +173,20 @@ def main(args):
             writer.add_scalar('val/bpd_elbo', valid_nelbo * bpd_coeff, epoch)
 
         save_freq = int(np.ceil(args.epochs / 100))
-        if epoch % save_freq == 0 or epoch == (args.epochs - 1):
-            if args.global_rank == 0:
+        # if epoch % 1 == 0 or epoch == (args.epochs - 1):
+        if True:
+            # if args.global_rank == 0:
+            if True:
                 logging.info('saving the model.')
                 torch.save({'epoch': epoch + 1, 'state_dict': model.state_dict(),
                             'optimizer': cnn_optimizer.state_dict(), 'global_step': global_step,
-                            'args': args, 'arch_instance': arch_instance, 'scheduler': cnn_scheduler.state_dict(),
-                            'grad_scalar': grad_scalar.state_dict()}, checkpoint_file)
+                            'args': temp_args, 'arch_instance': arch_instance, 'scheduler': cnn_scheduler.state_dict(),
+                            'grad_scalar': grad_scalar.state_dict(), 'classifier': classifier.state_dict(),
+                            'classifier_optimizer': classifier_optimizer.state_dict(),
+                            'classifier_scheduler': classifier_scheduler.state_dict()}, checkpoint_file)
 
     # Final validation
-    valid_neg_log_p, valid_nelbo = test(valid_queue, model, num_samples=1000, args=args, logging=logging)
+    valid_neg_log_p, valid_nelbo = test(valid_queue, model, num_samples=1000, args=temp_args, logging=logging)
     logging.info('final valid nelbo %f', valid_nelbo)
     logging.info('final valid neg log p %f', valid_neg_log_p)
     writer.add_scalar('val/neg_log_p', valid_neg_log_p, epoch + 1)
@@ -140,14 +196,21 @@ def main(args):
     writer.close()
 
 
-def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_iters, writer, logging):
+def train(train_queue, model, cnn_optimizer, grad_scalar, 
+global_step, warmup_iters, writer, logging, 
+classifier, classifier_criterion, classifier_optimizer, args):
     alpha_i = utils.kl_balancer_coeff(num_scales=model.num_latent_scales,
                                       groups_per_scale=model.groups_per_scale, fun='square')
     nelbo = utils.AvgrageMeter()
     model.train()
-    for step, x in enumerate(train_queue):
+    classifier.train()
+    step = 0
+    for x in tqdm(train_queue):
+        y = x[1]
+        y = y.cuda()
         x = x[0] if len(x) > 1 else x
         x = x.cuda()
+        batch_size = x.shape[0]
 
         # change bit length
         x = utils.pre_process(x, args.num_x_bits)
@@ -163,8 +226,15 @@ def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_it
             utils.average_params(model.parameters(), args.distributed)
 
         cnn_optimizer.zero_grad()
+        classifier_optimizer.zero_grad()
         with autocast():
             logits, log_q, log_p, kl_all, kl_diag = model(x)
+
+            logits_flat = logits.view(batch_size, -1)
+
+            result = classifier(logits_flat)
+
+            XE_loss = classifier_criterion(result, y)
 
             output = model.decoder_output(logits)
             kl_coeff = utils.kl_coeff(global_step, args.kl_anneal_portion * args.num_total_iter,
@@ -174,7 +244,7 @@ def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_it
             balanced_kl, kl_coeffs, kl_vals = utils.kl_balancer(kl_all, kl_coeff, kl_balance=True, alpha_i=alpha_i)
 
             nelbo_batch = recon_loss + balanced_kl
-            loss = torch.mean(nelbo_batch)
+            loss = torch.mean(nelbo_batch) + XE_loss
             norm_loss = model.spectral_norm_parallel()
             bn_loss = model.batchnorm_loss()
             # get spectral regularization coefficient (lambda)
@@ -190,6 +260,7 @@ def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_it
         grad_scalar.scale(loss).backward()
         utils.average_gradients(model.parameters(), args.distributed)
         grad_scalar.step(cnn_optimizer)
+        grad_scalar.step(classifier_optimizer)
         grad_scalar.update()
         nelbo.update(loss.data, 1)
 
@@ -231,6 +302,7 @@ def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_it
             writer.add_scalar('kl/total_active', total_active, global_step)
 
         global_step += 1
+        step += 1
 
     utils.average_tensor(nelbo.avg, args.distributed)
     return nelbo.avg, global_step
@@ -242,7 +314,8 @@ def test(valid_queue, model, num_samples, args, logging):
     nelbo_avg = utils.AvgrageMeter()
     neg_log_p_avg = utils.AvgrageMeter()
     model.eval()
-    for step, x in enumerate(valid_queue):
+    step = 0
+    for x in tqdm(valid_queue):
         x = x[0] if len(x) > 1 else x
         x = x.cuda()
 
@@ -272,6 +345,7 @@ def test(valid_queue, model, num_samples, args, logging):
         # block to sync
         dist.barrier()
     logging.info('val, step: %d, NELBO: %f, neg Log p %f', step, nelbo_avg.avg, neg_log_p_avg.avg)
+    step += 1
     return neg_log_p_avg.avg, nelbo_avg.avg
 
 
@@ -332,20 +406,20 @@ def cleanup():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('encoder decoder examiner')
     # experimental results
-    parser.add_argument('--root', type=str, default='/tmp/nasvae/expr',
+    parser.add_argument('--root', type=str, default='/content/gdrive/MyDrive/Colab_Models/NVAE',
                         help='location of the results')
-    parser.add_argument('--save', type=str, default='exp',
+    parser.add_argument('--save', type=str, default='/cifar10/qualitative-2',
                         help='id used for storing intermediate results')
     # data
-    parser.add_argument('--dataset', type=str, default='mnist',
+    parser.add_argument('--dataset', type=str, default='cifar10',
                         choices=['cifar10', 'mnist', 'omniglot', 'celeba_64', 'celeba_256',
                                  'imagenet_32', 'ffhq', 'lsun_bedroom_128', 'stacked_mnist',
                                  'lsun_church_128', 'lsun_church_64'],
                         help='which dataset to use')
-    parser.add_argument('--data', type=str, default='/tmp/nasvae/data',
+    parser.add_argument('--data', type=str, default='/content/data/cifar10',
                         help='location of the data corpus')
     # optimization
-    parser.add_argument('--batch_size', type=int, default=200,
+    parser.add_argument('--batch_size', type=int, default=16,
                         help='batch size per GPU')
     parser.add_argument('--learning_rate', type=float, default=1e-2,
                         help='init learning rate')
@@ -360,11 +434,11 @@ if __name__ == '__main__':
     parser.add_argument('--weight_decay_norm_anneal', action='store_true', default=False,
                         help='This flag enables annealing the lambda coefficient from '
                              '--weight_decay_norm_init to --weight_decay_norm.')
-    parser.add_argument('--epochs', type=int, default=200,
+    parser.add_argument('--epochs', type=int, default=420,
                         help='num of training epochs')
     parser.add_argument('--warmup_epochs', type=int, default=5,
                         help='num of training epochs in which lr is warmed up')
-    parser.add_argument('--fast_adamax', action='store_true', default=False,
+    parser.add_argument('--fast_adamax', action='store_true', default=True,
                         help='This flag enables using our optimized adamax.')
     parser.add_argument('--arch_instance', type=str, default='res_mbconv',
                         help='path to the architecture instance')
@@ -416,7 +490,7 @@ if __name__ == '__main__':
                         help='This flag enables squeeze and excitation.')
     parser.add_argument('--res_dist', action='store_true', default=False,
                         help='This flag enables squeeze and excitation.')
-    parser.add_argument('--cont_training', action='store_true', default=False,
+    parser.add_argument('--cont_training', action='store_true', default=True,
                         help='This flag enables training from an existing checkpoint.')
     # DDP.
     parser.add_argument('--num_proc_node', type=int, default=1,
@@ -434,9 +508,8 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=1,
                         help='seed used for initialization')
     args = parser.parse_args()
-    args.save = args.root + '/eval-' + args.save
     utils.create_exp_dir(args.save)
-
+    args.save = args.root + args.save
     size = args.num_process_per_node
 
     if size > 1:
