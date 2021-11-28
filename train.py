@@ -123,8 +123,8 @@ def main(args):
         global_step = checkpoint['global_step']
         # classifier.load_state_dict(checkpoint['classifier'])
         # classifier = classifier.cuda()
-        # classifier_optimizer.load_state_dict(['classifier_optimizer'])
-        # classifier_scheduler.load_state_dict(['classifier_scheduler'])
+        # classifier_optimizer.load_state_dict(checkpoint['classifier_optimizer'])
+        # classifier_scheduler.load_state_dict(checkpoint['classifier_scheduler'])
     else:
         global_step, init_epoch = 0, 0
 
@@ -244,6 +244,7 @@ classifier, classifier_criterion, classifier_optimizer, args):
             balanced_kl, kl_coeffs, kl_vals = utils.kl_balancer(kl_all, kl_coeff, kl_balance=True, alpha_i=alpha_i)
 
             nelbo_batch = recon_loss + balanced_kl
+
             loss = torch.mean(nelbo_batch) + XE_loss
             norm_loss = model.spectral_norm_parallel()
             bn_loss = model.batchnorm_loss()
@@ -339,13 +340,14 @@ def test(valid_queue, model, num_samples, args, logging):
         nelbo_avg.update(nelbo.data, x.size(0))
         neg_log_p_avg.update(- log_p.data, x.size(0))
 
+        step += 1
+
     utils.average_tensor(nelbo_avg.avg, args.distributed)
     utils.average_tensor(neg_log_p_avg.avg, args.distributed)
     if args.distributed:
         # block to sync
         dist.barrier()
     logging.info('val, step: %d, NELBO: %f, neg Log p %f', step, nelbo_avg.avg, neg_log_p_avg.avg)
-    step += 1
     return neg_log_p_avg.avg, nelbo_avg.avg
 
 
@@ -408,7 +410,7 @@ if __name__ == '__main__':
     # experimental results
     parser.add_argument('--root', type=str, default='/content/gdrive/MyDrive/Colab_Models/NVAE',
                         help='location of the results')
-    parser.add_argument('--save', type=str, default='/cifar10/qualitative-2',
+    parser.add_argument('--save', type=str, default='/cifar10/qualitative-1',
                         help='id used for storing intermediate results')
     # data
     parser.add_argument('--dataset', type=str, default='cifar10',
@@ -419,7 +421,7 @@ if __name__ == '__main__':
     parser.add_argument('--data', type=str, default='/content/data/cifar10',
                         help='location of the data corpus')
     # optimization
-    parser.add_argument('--batch_size', type=int, default=16,
+    parser.add_argument('--batch_size', type=int, default=20,
                         help='batch size per GPU')
     parser.add_argument('--learning_rate', type=float, default=1e-2,
                         help='init learning rate')
