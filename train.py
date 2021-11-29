@@ -25,6 +25,7 @@ from fid.inception import InceptionV3
 
 from tqdm.notebook import tqdm, tqdm_notebook
 from classifier import MLP
+from center_loss import CenterLoss
 
 def main(args):
     # ensures that weight initializations are all the same
@@ -47,8 +48,7 @@ def main(args):
     model = AutoEncoder(args, writer, arch_instance)
     model = model.cuda()
 
-    # classifier = MLP([102400, 6400, 400, 10])
-    classifier = MLP([102400, 10])
+    classifier = MLP()
     classifier = classifier.cuda()
 
     logging.info('args = %s', args)
@@ -68,9 +68,12 @@ def main(args):
 
     # Define Criterion/ Loss function
     classifier_criterion = nn.CrossEntropyLoss()
+    classifier_cent_cri = CenterLoss(num_classes=10, feat_dim=2, use_gpu=True)
 
     # Define Adam Optimizer
     classifier_optimizer = torch.optim.Adam(classifier.parameters(), lr = 0.001)
+
+    classifier_cent_op = torch.optim.SGD(classifier_cent_cri.parameters(), lr=0.5)
 
     classifier_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(classifier_optimizer, 'min', factor=0.5, patience=5, verbose=True)
 
@@ -125,6 +128,7 @@ def main(args):
         # classifier = classifier.cuda()
         # classifier_optimizer.load_state_dict(checkpoint['classifier_optimizer'])
         # classifier_scheduler.load_state_dict(checkpoint['classifier_scheduler'])
+        # classifier_cent_op.load_state_dict(checkpoint['classifier_cent_op'])
     else:
         global_step, init_epoch = 0, 0
 
@@ -143,7 +147,8 @@ def main(args):
         # Training.
         train_nelbo, global_step = train(train_queue, model, cnn_optimizer,
          grad_scalar, global_step, warmup_iters, writer, logging, 
-         classifier, classifier_criterion, classifier_optimizer, temp_args)
+         classifier, classifier_criterion, classifier_optimizer, 
+         classifier_cent_cri, classifier_cent_op, temp_args)
         logging.info('train_nelbo %f', train_nelbo)
         writer.add_scalar('train/nelbo', train_nelbo, global_step)
 
@@ -183,7 +188,8 @@ def main(args):
                             'args': temp_args, 'arch_instance': arch_instance, 'scheduler': cnn_scheduler.state_dict(),
                             'grad_scalar': grad_scalar.state_dict(), 'classifier': classifier.state_dict(),
                             'classifier_optimizer': classifier_optimizer.state_dict(),
-                            'classifier_scheduler': classifier_scheduler.state_dict()}, checkpoint_file)
+                            'classifier_scheduler': classifier_scheduler.state_dict(), 
+                            'classifier_cent_op': classifier_cent_op.state_dict()}, checkpoint_file)
 
     # Final validation
     valid_neg_log_p, valid_nelbo = test(valid_queue, model, num_samples=1000, args=temp_args, logging=logging)
@@ -198,7 +204,8 @@ def main(args):
 
 def train(train_queue, model, cnn_optimizer, grad_scalar, 
 global_step, warmup_iters, writer, logging, 
-classifier, classifier_criterion, classifier_optimizer, args):
+classifier, classifier_criterion, classifier_optimizer, 
+classifier_cent_cri, classifier_cent_op, args):
     alpha_i = utils.kl_balancer_coeff(num_scales=model.num_latent_scales,
                                       groups_per_scale=model.groups_per_scale, fun='square')
     nelbo = utils.AvgrageMeter()
@@ -227,14 +234,16 @@ classifier, classifier_criterion, classifier_optimizer, args):
 
         cnn_optimizer.zero_grad()
         classifier_optimizer.zero_grad()
+        classifier_cent_op.zero_grad()
         with autocast():
             logits, log_q, log_p, kl_all, kl_diag = model(x)
 
             logits_flat = logits.view(batch_size, -1)
 
-            result = classifier(logits_flat)
+            result, feature = classifier(logits_flat)
 
             XE_loss = classifier_criterion(result, y)
+            CE_loss = classifier_cent_cri(feature.float(), y)
 
             output = model.decoder_output(logits)
             kl_coeff = utils.kl_coeff(global_step, args.kl_anneal_portion * args.num_total_iter,
@@ -245,7 +254,7 @@ classifier, classifier_criterion, classifier_optimizer, args):
 
             nelbo_batch = recon_loss + balanced_kl
 
-            loss = torch.mean(nelbo_batch) + XE_loss
+            loss = torch.mean(nelbo_batch) + XE_loss * 10 + CE_loss * 10
             norm_loss = model.spectral_norm_parallel()
             bn_loss = model.batchnorm_loss()
             # get spectral regularization coefficient (lambda)
@@ -261,8 +270,11 @@ classifier, classifier_criterion, classifier_optimizer, args):
         grad_scalar.scale(loss).backward()
         utils.average_gradients(model.parameters(), args.distributed)
         grad_scalar.step(cnn_optimizer)
-        grad_scalar.step(classifier_optimizer)
         grad_scalar.update()
+        classifier_optimizer.step()
+        for param in classifier_cent_cri.parameters():
+            param.grad.data *= (1. / 10)
+        classifier_cent_op.step()
         nelbo.update(loss.data, 1)
 
         if (global_step + 1) % 100 == 0:
@@ -410,7 +422,7 @@ if __name__ == '__main__':
     # experimental results
     parser.add_argument('--root', type=str, default='/content/gdrive/MyDrive/Colab_Models/NVAE',
                         help='location of the results')
-    parser.add_argument('--save', type=str, default='/cifar10/qualitative-1',
+    parser.add_argument('--save', type=str, default='/cifar10/qualitative-2',
                         help='id used for storing intermediate results')
     # data
     parser.add_argument('--dataset', type=str, default='cifar10',
@@ -510,8 +522,8 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=1,
                         help='seed used for initialization')
     args = parser.parse_args()
-    utils.create_exp_dir(args.save)
     args.save = args.root + args.save
+    utils.create_exp_dir(args.save)
     size = args.num_process_per_node
 
     if size > 1:
@@ -534,5 +546,3 @@ if __name__ == '__main__':
         print('starting in debug mode')
         args.distributed = True
         init_processes(0, size, main, args)
-
-
