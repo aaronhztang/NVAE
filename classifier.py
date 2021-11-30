@@ -21,14 +21,14 @@ class MLP(nn.Module):
     def __init__(self):
         super(MLP, self).__init__()
 
-        self.model = nn.Sequential(
+        self.output = nn.Sequential(
             nn.Linear(102400, 10),
         )
         self.embed = nn.Sequential(
-            nn.ReLU(),
             nn.Linear(102400, 2),
+            nn.ReLU(),
         )
 
     def forward(self, x):
-        return self.model(x), self.embed(x)
+        return self.output(x), self.embed(x)
 

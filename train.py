@@ -254,7 +254,7 @@ classifier_cent_cri, classifier_cent_op, args):
 
             nelbo_batch = recon_loss + balanced_kl
 
-            loss = torch.mean(nelbo_batch) + XE_loss * 10 + CE_loss * 10
+            loss = torch.mean(nelbo_batch) + XE_loss * 25 + CE_loss * 25
             norm_loss = model.spectral_norm_parallel()
             bn_loss = model.batchnorm_loss()
             # get spectral regularization coefficient (lambda)
@@ -273,7 +273,7 @@ classifier_cent_cri, classifier_cent_op, args):
         grad_scalar.update()
         classifier_optimizer.step()
         for param in classifier_cent_cri.parameters():
-            param.grad.data *= (1. / 10)
+            param.grad.data *= (1. / 25)
         classifier_cent_op.step()
         nelbo.update(loss.data, 1)
 
@@ -422,7 +422,7 @@ if __name__ == '__main__':
     # experimental results
     parser.add_argument('--root', type=str, default='/content/gdrive/MyDrive/Colab_Models/NVAE',
                         help='location of the results')
-    parser.add_argument('--save', type=str, default='/cifar10/qualitative-2',
+    parser.add_argument('--save', type=str, default='/cifar10/qualitative-3',
                         help='id used for storing intermediate results')
     # data
     parser.add_argument('--dataset', type=str, default='cifar10',
