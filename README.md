@@ -4,7 +4,7 @@
 
 * huangzet: based on pre-trained model
 * leweiliu: train from scratch
-* haoyuezhao: alternate VAE model
+* haoyuezhao: alternate VAE model. Implementations are in `haoyuezhao` branch `NVAE/alternate_VAE/` folder.
 
 -------------------------------------------
 
