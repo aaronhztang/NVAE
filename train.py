@@ -26,6 +26,7 @@ from fid.inception import InceptionV3
 from tqdm.notebook import tqdm, tqdm_notebook
 from classifier import MLP
 from center_loss import CenterLoss
+import matplotlib.pyplot as plt
 
 def main(args):
     # ensures that weight initializations are all the same
@@ -321,7 +322,7 @@ classifier_cent_cri, classifier_cent_op, args):
     return nelbo.avg, global_step
 
 
-def test(valid_queue, model, num_samples, args, logging):
+def test(valid_queue, model, num_samples, args, logging, classifier):
     if args.distributed:
         dist.barrier()
     nelbo_avg = utils.AvgrageMeter()
@@ -329,8 +330,10 @@ def test(valid_queue, model, num_samples, args, logging):
     model.eval()
     step = 0
     for x in tqdm(valid_queue):
+        y = x[1]
         x = x[0] if len(x) > 1 else x
         x = x.cuda()
+        batch_size = x.shape[0]
 
         # change bit length
         x = utils.pre_process(x, args.num_x_bits)
@@ -339,6 +342,13 @@ def test(valid_queue, model, num_samples, args, logging):
             nelbo, log_iw = [], []
             for k in range(num_samples):
                 logits, log_q, log_p, kl_all, _ = model(x)
+
+                logits_flat = logits.view(batch_size, -1)
+                result, feature = classifier(logits_flat)
+
+                scatter = feature.cpu().detach().numpy()
+                plt.scatter(scatter[:, 0], scatter[:, 1], c=y, cmap='tab10', s=1.1)
+
                 output = model.decoder_output(logits)
                 recon_loss = utils.reconstruction_loss(output, x, crop=model.crop_output)
                 balanced_kl, _, _ = utils.kl_balancer(kl_all, kl_balance=False)
@@ -353,6 +363,9 @@ def test(valid_queue, model, num_samples, args, logging):
         neg_log_p_avg.update(- log_p.data, x.size(0))
 
         step += 1
+    
+    plt.colorbar()
+    plt.show()
 
     utils.average_tensor(nelbo_avg.avg, args.distributed)
     utils.average_tensor(neg_log_p_avg.avg, args.distributed)

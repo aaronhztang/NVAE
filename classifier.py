@@ -26,7 +26,6 @@ class MLP(nn.Module):
         )
         self.embed = nn.Sequential(
             nn.Linear(102400, 2),
-            nn.ReLU(),
         )
 
     def forward(self, x):

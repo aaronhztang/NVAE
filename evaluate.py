@@ -20,6 +20,11 @@ import utils
 import datasets
 from train import test, init_processes, test_vae_fid
 
+from tqdm.notebook import tqdm, tqdm_notebook
+from classifier import MLP
+from center_loss import CenterLoss
+import matplotlib.pyplot as plt
+
 
 def set_bn(model, bn_eval_mode, num_samples=1, t=1.0, iter=100):
     if bn_eval_mode:
@@ -68,6 +73,10 @@ def main(eval_args):
     model.load_state_dict(checkpoint['state_dict'], strict=False)
     model = model.cuda()
 
+    classifier = MLP()
+    # classifier.load_state_dict(checkpoint['classifier'])
+    classifier = classifier.cuda()
+
     logging.info('args = %s', args)
     logging.info('num conv layers: %d', len(model.all_conv_layers))
     logging.info('param size = %fM ', utils.count_parameters_in_M(model))
@@ -85,7 +94,7 @@ def main(eval_args):
         num_output = utils.num_output(args.dataset)
         bpd_coeff = 1. / np.log(2.) / num_output
 
-        valid_neg_log_p, valid_nelbo = test(valid_queue, model, num_samples=eval_args.num_iw_samples, args=args, logging=logging)
+        valid_neg_log_p, valid_nelbo = test(valid_queue, model, num_samples=eval_args.num_iw_samples, args=args, logging=logging, classifier=classifier)
         logging.info('final valid nelbo %f', valid_nelbo)
         logging.info('final valid neg log p %f', valid_neg_log_p)
         logging.info('final valid nelbo in bpd %f', valid_nelbo * bpd_coeff)
@@ -118,7 +127,7 @@ def main(eval_args):
                 end = time()
                 logging.info('sampling time per batch: %0.3f sec', (end - start))
 
-                visualize = False
+                visualize = True
                 if visualize:
                     output_tiled = utils.tile_image(output_img, n).cpu().numpy().transpose(1, 2, 0)
                     output_tiled = np.asarray(output_tiled * 255, dtype=np.uint8)
@@ -135,23 +144,23 @@ def main(eval_args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('encoder decoder examiner')
     # experimental results
-    parser.add_argument('--checkpoint', type=str, default='/tmp/expr/checkpoint.pt',
+    parser.add_argument('--checkpoint', type=str, default='/content/gdrive/MyDrive/Colab_Models/NVAE/cifar10/qualitative-3/checkpoint.pt',
                         help='location of the checkpoint')
-    parser.add_argument('--save', type=str, default='/tmp/expr',
+    parser.add_argument('--save', type=str, default='/content/gdrive/MyDrive/Colab_Models/NVAE/cifar10/qualitative-3/',
                         help='location of the checkpoint')
     parser.add_argument('--eval_mode', type=str, default='sample', choices=['sample', 'evaluate', 'evaluate_fid'],
                         help='evaluation mode. you can choose between sample or evaluate.')
     parser.add_argument('--eval_on_train', action='store_true', default=False,
                         help='Settings this to true will evaluate the model on training data.')
-    parser.add_argument('--data', type=str, default='/tmp/data',
+    parser.add_argument('--data', type=str, default='/content/data/cifar10',
                         help='location of the data corpus')
-    parser.add_argument('--readjust_bn', action='store_true', default=False,
+    parser.add_argument('--readjust_bn', action='store_true', default=True,
                         help='adding this flag will enable readjusting BN statistics.')
-    parser.add_argument('--temp', type=float, default=0.7,
+    parser.add_argument('--temp', type=float, default=0.6,
                         help='The temperature used for sampling.')
-    parser.add_argument('--num_iw_samples', type=int, default=1000,
+    parser.add_argument('--num_iw_samples', type=int, default=1,
                         help='The number of IW samples used in test_ll mode.')
-    parser.add_argument('--fid_dir', type=str, default='/tmp/fid-stats',
+    parser.add_argument('--fid_dir', type=str, default='/content/gdrive/MyDrive/Colab_Models/NVAE/cifar10/qualitative-3/',
                         help='path to directory where fid related files are stored')
     parser.add_argument('--batch_size', type=int, default=0,
                         help='Batch size used during evaluation. If set to zero, training batch size is used.')
