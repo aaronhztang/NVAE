@@ -1,3 +1,13 @@
+# 11785 Team 40 Project
+
+## This is the original code base branch. Our different approaches are located in other branches.
+
+* huangzet: based on pre-trained model
+* leweiliu: train from scratch
+* haoyuezhao: alternate VAE model
+
+-------------------------------------------
+
 # The Official PyTorch Implementation of "NVAE: A Deep Hierarchical Variational Autoencoder" [(NeurIPS 2020 Spotlight Paper)](https://arxiv.org/abs/2007.03898)
 
 <div align="center">
