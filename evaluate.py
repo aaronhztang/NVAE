@@ -41,7 +41,7 @@ def main(eval_args):
     # load a checkpoint
     logging.info('loading the model at:')
     logging.info(eval_args.checkpoint)
-    checkpoint = torch.load(eval_args.checkpoint, map_location='cpu')
+    checkpoint = torch.load('/content/drive/MyDrive/DL_NVAE_Model/cifar10/qualitative/checkpoint.pt', map_location='cpu')
     args = checkpoint['args']
 
     if not hasattr(args, 'ada_groups'):
@@ -66,6 +66,7 @@ def main(eval_args):
     # is only used for computing the spectral normalization and it is safe not to load it. Some of our earlier models
     # did not have this variable.
     model.load_state_dict(checkpoint['state_dict'], strict=False)
+    print(model)
     model = model.cuda()
 
     logging.info('args = %s', args)
@@ -75,6 +76,7 @@ def main(eval_args):
     if eval_args.eval_mode == 'evaluate':
         # load train valid queue
         args.data = eval_args.data
+        print('=========================', args.data)
         train_queue, valid_queue, num_classes = datasets.get_loaders(args)
 
         if eval_args.eval_on_train:
@@ -83,6 +85,7 @@ def main(eval_args):
 
         # get number of bits
         num_output = utils.num_output(args.dataset)
+        print(num_output)
         bpd_coeff = 1. / np.log(2.) / num_output
 
         valid_neg_log_p, valid_nelbo = test(valid_queue, model, num_samples=eval_args.num_iw_samples, args=args, logging=logging)
@@ -118,7 +121,7 @@ def main(eval_args):
                 end = time()
                 logging.info('sampling time per batch: %0.3f sec', (end - start))
 
-                visualize = False
+                visualize = True
                 if visualize:
                     output_tiled = utils.tile_image(output_img, n).cpu().numpy().transpose(1, 2, 0)
                     output_tiled = np.asarray(output_tiled * 255, dtype=np.uint8)
@@ -126,6 +129,7 @@ def main(eval_args):
 
                     plt.imshow(output_tiled)
                     plt.show()
+                    # plt.savefig(ind + '.png')
                 else:
                     file_path = os.path.join(eval_args.save, 'gpu_%d_samples_%d.npz' % (eval_args.local_rank, ind))
                     np.savez_compressed(file_path, samples=output_img.cpu().numpy())
@@ -147,7 +151,7 @@ if __name__ == '__main__':
                         help='location of the data corpus')
     parser.add_argument('--readjust_bn', action='store_true', default=False,
                         help='adding this flag will enable readjusting BN statistics.')
-    parser.add_argument('--temp', type=float, default=0.7,
+    parser.add_argument('--temp', type=float, default=1,
                         help='The temperature used for sampling.')
     parser.add_argument('--num_iw_samples', type=int, default=1000,
                         help='The number of IW samples used in test_ll mode.')
@@ -170,19 +174,31 @@ if __name__ == '__main__':
 
     size = args.world_size
 
-    if size > 1:
-        args.distributed = True
-        processes = []
-        for rank in range(size):
-            args.local_rank = rank
-            p = Process(target=init_processes, args=(rank, size, main, args))
-            p.start()
-            processes.append(p)
+    # if size > 1:
+    #     args.distributed = True
+    #     processes = []
+    #     for rank in range(size):
+    #         args.local_rank = rank
+    #         p = Process(target=init_processes, args=(rank, size, main, args))
+    #         p.start()
+    #         processes.append(p)
 
-        for p in processes:
-            p.join()
-    else:
-        # for debugging
-        print('starting in debug mode')
-        args.distributed = True
-        init_processes(0, size, main, args)
+    #     for p in processes:
+    #         p.join()
+    # else:
+    #     # for debugging
+    #     print('starting in debug mode')
+    #     args.distributed = True
+    #     init_processes(0, size, main, args)
+    print(args)
+
+    args.distributed = True
+    processes = []
+    for rank in range(size):
+        args.local_rank = rank
+        p = Process(target=init_processes, args=(rank, size, main, args))
+        p.start()
+        processes.append(p)
+
+    for p in processes:
+        p.join()
