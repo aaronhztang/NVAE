@@ -1,3 +1,9 @@
+# 11785 Team 40 Project Pre-trained Model Approach
+
+Based on original NVAE, classifier is added to the latent space to incorporate supervised learning. Cross-Entropy Loss and Center Loss are used to measure the loss of supervised learning. Changes are made to `train.py` and `evaluate.py` to adjust the training and evaluating way with supervised learning. To run the model, adjust parameters in these two files according to the instructions below to continue training or evaluating. The nelbo results will be logged into `log.txt`.
+
+-----------------------------
+
 # The Official PyTorch Implementation of "NVAE: A Deep Hierarchical Variational Autoencoder" [(NeurIPS 2020 Spotlight Paper)](https://arxiv.org/abs/2007.03898)
 
 <div align="center">
